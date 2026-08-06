@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
@@ -69,6 +70,110 @@ def register_operational_tools(mcp: FastMCP) -> None:
         )
 
     @mcp.tool()
+    async def ibkr_get_operational_historical_data(
+        ctx: Context[ServerSession, AppContext],
+        symbol: str,
+        duration: str = "5 D",
+        barSize: str = "5 mins",
+        whatToShow: str = "TRADES",
+        useRTH: bool = True,
+        exchange: str = "SMART",
+        currency: str = "USD",
+        maxAgeSeconds: float = 60.0,
+    ) -> Dict[str, Any]:
+        """Get cached historical bars through the conservative pacing governor."""
+        from ib_async import Stock
+
+        app_context = ctx.request_context.lifespan_context
+        tws = app_context.tws
+        runtime = app_context.runtime
+        if not tws or not tws.is_connected():
+            return {"error": "TWS client not connected"}
+
+        symbol = symbol.strip().upper()
+        what_to_show = whatToShow.strip().upper()
+        cache_key = "|".join(
+            [symbol, exchange, currency, duration, barSize, what_to_show, str(useRTH)]
+        )
+        historical_cache = getattr(runtime, "historical_cache", None)
+        if historical_cache is None:
+            historical_cache = {}
+            runtime.historical_cache = historical_cache
+        cached = historical_cache.get(cache_key)
+        if cached and maxAgeSeconds > 0:
+            age = time.monotonic() - float(cached["stored_at"])
+            if age <= maxAgeSeconds:
+                result = dict(cached["payload"])
+                result.update({"cache_hit": True, "cache_age_seconds": round(age, 3)})
+                return result
+
+        general = await runtime.governor.check_general()
+        if not general.allowed:
+            return {
+                "error": "pacing guard rejected contract qualification",
+                "pacing": general.as_dict(),
+            }
+        qualified = await tws.ib.qualifyContractsAsync(
+            Stock(symbol, exchange, currency.upper())
+        )
+        if not qualified:
+            return {"error": f"could not qualify {symbol}"}
+        contract = qualified[0]
+        con_id = getattr(contract, "conId", symbol)
+        historical = await runtime.governor.check_historical(
+            request_key=f"{con_id}|{duration}|{barSize}|{what_to_show}|{useRTH}",
+            contract_key=f"{con_id}|{exchange}|{what_to_show}",
+            bid_ask=what_to_show == "BID_ASK",
+        )
+        if not historical.allowed:
+            return {
+                "error": "pacing guard rejected historical request",
+                "pacing": historical.as_dict(),
+            }
+
+        bars = await tws.ib.reqHistoricalDataAsync(
+            contract,
+            endDateTime="",
+            durationStr=duration,
+            barSizeSetting=barSize,
+            whatToShow=what_to_show,
+            useRTH=useRTH,
+            formatDate=1,
+        )
+        payload = {
+            "symbol": symbol,
+            "conId": con_id,
+            "duration": duration,
+            "barSize": barSize,
+            "whatToShow": what_to_show,
+            "useRTH": useRTH,
+            "bars": [
+                {
+                    "date": (
+                        bar.date.isoformat()
+                        if hasattr(bar.date, "isoformat")
+                        else str(bar.date)
+                    ),
+                    "open": bar.open,
+                    "high": bar.high,
+                    "low": bar.low,
+                    "close": bar.close,
+                    "volume": bar.volume,
+                    "average": getattr(bar, "average", None),
+                    "barCount": getattr(bar, "barCount", None),
+                }
+                for bar in bars
+            ],
+            "count": len(bars),
+            "cache_hit": False,
+        }
+        historical_cache[cache_key] = {
+            "stored_at": time.monotonic(),
+            "payload": payload,
+        }
+        return payload
+
+    @mcp.tool()
     async def ibkr_validate_order_intent(
         ctx: Context[ServerSession, AppContext],
         account: str,
@@ -80,16 +185,20 @@ def register_operational_tools(mcp: FastMCP) -> None:
     ) -> Dict[str, Any]:
         """Validate an intended order without placing it."""
         runtime = ctx.request_context.lifespan_context.runtime
+        action = action.strip().upper()
         result = runtime.validate_order_intent(
             account=account,
             quantity=quantity,
             estimated_price=estimatedPrice,
             confirmation_token=confirmationToken,
         )
+        if action not in {"BUY", "SELL"}:
+            result["blockers"].append("action must be BUY or SELL")
+            result["allowed"] = False
         result.update(
             {
                 "symbol": symbol.strip().upper(),
-                "action": action.strip().upper(),
+                "action": action,
                 "quantity": quantity,
             }
         )
@@ -107,7 +216,7 @@ def register_operational_tools(mcp: FastMCP) -> None:
         exchange: str = "SMART",
         currency: str = "USD",
     ) -> Dict[str, Any]:
-        """Place a guarded stock limit order after account, data, and risk checks.
+        """Place a guarded USD stock limit order after account, data, and risk checks.
 
         The exact symbol must already have a fresh LIVE operational stream. Market
         orders are intentionally unsupported. The default server mode prevents live
@@ -123,6 +232,7 @@ def register_operational_tools(mcp: FastMCP) -> None:
 
         symbol = symbol.strip().upper()
         action = action.strip().upper()
+        currency = currency.strip().upper()
         if action not in {"BUY", "SELL"}:
             return {"allowed": False, "error": "action must be BUY or SELL"}
         if quantity <= 0 or limitPrice <= 0:
@@ -138,6 +248,31 @@ def register_operational_tools(mcp: FastMCP) -> None:
         accounts = list(tws.ib.managedAccounts())
         if account not in accounts:
             blockers.append("account is not visible in managedAccounts")
+        if currency != "USD":
+            blockers.append("guarded order notional is USD-only; non-USD orders are blocked")
+
+        order_ref = f"mcp-guarded:{confirmationToken[:48]}"
+        visible_trades = list(tws.ib.trades())
+        if any(getattr(item.order, "orderRef", "") == order_ref for item in visible_trades):
+            blockers.append("confirmation token was already used for an order")
+        for item in tws.ib.openTrades():
+            if (
+                getattr(item.contract, "symbol", "").upper() == symbol
+                and getattr(item.order, "action", "").upper() == action
+                and getattr(item.orderStatus, "remaining", 0) > 0
+            ):
+                blockers.append("a same-symbol same-side open order already exists")
+                break
+
+        if action == "SELL":
+            long_position = sum(
+                float(position.position)
+                for position in tws.ib.positions()
+                if position.account == account
+                and getattr(position.contract, "symbol", "").upper() == symbol
+            )
+            if long_position < quantity:
+                blockers.append("short sales are disabled and the long position is insufficient")
 
         stream = runtime.operational_streams.get(symbol)
         if not stream:
@@ -169,7 +304,7 @@ def register_operational_tools(mcp: FastMCP) -> None:
             return {"allowed": False, "error": f"could not qualify {symbol}"}
         contract = qualified[0]
         order = LimitOrder(action, quantity, limitPrice, account=account)
-        order.orderRef = f"mcp-guarded:{confirmationToken[:48]}"
+        order.orderRef = order_ref
         trade = tws.ib.placeOrder(contract, order)
         await asyncio.sleep(0.5)
 
