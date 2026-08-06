@@ -28,6 +28,7 @@ from .tools import (
     register_operational_tools,
     register_options_tools,
     register_order_tools,
+    register_read_only_order_tools,
     register_scanner_tools,
 )
 from .tws_client import TWSClient
@@ -70,10 +71,18 @@ register_advanced_tools(mcp)
 register_fundamentals_tools(mcp)
 register_operational_tools(mcp)
 
+legacy_write_tools_enabled = (
+    SERVER_POLICY.order_tools_enabled and SERVER_POLICY.enable_legacy_order_tools
+)
+
+# Preserve monitoring in safe mode without publishing the original mutation tools.
+if not legacy_write_tools_enabled:
+    register_read_only_order_tools(mcp)
+
 # The original order and options modules expose direct order placement. They are
 # disabled by default. Guarded stock limit orders remain available through the
 # operational module and enforce policy at call time.
-if SERVER_POLICY.order_tools_enabled and SERVER_POLICY.enable_legacy_order_tools:
+if legacy_write_tools_enabled:
     register_order_tools(mcp)
     register_options_tools(mcp)
 
@@ -95,10 +104,8 @@ async def health_check(request):
             "status": "healthy",
             "agent_mode": SERVER_POLICY.agent_mode,
             "order_tools_enabled": SERVER_POLICY.order_tools_enabled,
-            "legacy_order_tools_enabled": (
-                SERVER_POLICY.order_tools_enabled
-                and SERVER_POLICY.enable_legacy_order_tools
-            ),
+            "legacy_order_tools_enabled": legacy_write_tools_enabled,
+            "read_only_order_monitoring": not legacy_write_tools_enabled,
         }
     )
 
