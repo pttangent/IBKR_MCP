@@ -1,8 +1,9 @@
 """Connection management tools for IBKR TWS API."""
 
 import os
-from typing import Dict, Any
-from mcp.server.fastmcp import FastMCP, Context
+from typing import Any, Dict
+
+from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.session import ServerSession
 
 try:
@@ -11,89 +12,101 @@ except ImportError:
     from src.models import AppContext
 
 
-def register_connection_tools(mcp: FastMCP):
-    """Register connection management tools."""
-    
+def register_connection_tools(mcp: FastMCP) -> None:
     @mcp.tool()
     async def ibkr_connect(
         ctx: Context[ServerSession, AppContext],
         host: str = os.getenv("TWS_HOST", "127.0.0.1"),
         port: int = int(os.getenv("TWS_PORT", 7497)),
-        clientId: int = int(os.getenv("TWS_CLIENT_ID", 1))
+        clientId: int = int(os.getenv("TWS_CLIENT_ID", 1)),
     ) -> Dict[str, Any]:
-        """Connect to TWS/IB Gateway.
-        
-        Args:
-            host: TWS/Gateway host (default: 127.0.0.1)
-            port: TWS/Gateway port (7497 for TWS, 4001 for IB Gateway Paper, 4002 for Live)
-            clientId: Unique client ID (default: 1)
-            
-        Returns:
-            Connection status with host, port, and clientId
-        """
-        tws = ctx.request_context.lifespan_context.tws
+        """Connect and verify that the session matches the configured safety mode."""
+        app_context = ctx.request_context.lifespan_context
+        tws = app_context.tws
+        runtime = app_context.runtime
         await tws.connect(host, port, clientId)
-        return {"status": "connected", "host": host, "port": port, "clientId": clientId}
+
+        accounts = list(tws.ib.managedAccounts()) if tws.ib else []
+        account_mode, account_reason = runtime.detect_account_mode(accounts)
+        if runtime.policy.agent_mode == "paper" and account_mode != "paper":
+            tws.disconnect()
+            return {
+                "status": "rejected",
+                "error": "paper mode could not positively identify a paper account",
+                "accounts": accounts,
+                "account_mode": account_mode,
+                "account_mode_reason": account_reason,
+                "remediation": (
+                    "Set TWS_PAPER_ACCOUNT to the exact paper account ID and log "
+                    "TWS/IB Gateway into the paper username."
+                ),
+            }
+
+        return {
+            "status": "connected",
+            "host": host,
+            "port": port,
+            "clientId": clientId,
+            "accounts": accounts,
+            "account_mode": account_mode,
+            "account_mode_reason": account_reason,
+            "policy": runtime.policy.as_dict(),
+            "next_step": "Call ibkr_probe_capabilities before starting a radar or order workflow.",
+        }
 
     @mcp.tool()
     async def ibkr_disconnect(
-        ctx: Context[ServerSession, AppContext]
+        ctx: Context[ServerSession, AppContext],
     ) -> Dict[str, Any]:
-        """Disconnect from TWS/IB Gateway.
-        
-        Returns:
-            Disconnection status
-        """
-        tws = ctx.request_context.lifespan_context.tws
-        tws.disconnect()
+        """Stop operational streams and disconnect from TWS/IB Gateway."""
+        app_context = ctx.request_context.lifespan_context
+        for stream in list(app_context.runtime.operational_streams.values()):
+            task = stream.get("task")
+            if task:
+                task.cancel()
+        app_context.runtime.operational_streams.clear()
+        app_context.tws.disconnect()
         return {"status": "disconnected"}
 
     @mcp.tool()
     async def ibkr_get_status(
-        ctx: Context[ServerSession, AppContext]
+        ctx: Context[ServerSession, AppContext],
     ) -> Dict[str, Any]:
-        """Get connection status.
-        
-        Returns:
-            Current connection status (connected/disconnected)
-        """
-        tws = ctx.request_context.lifespan_context.tws
-        return {"is_connected": tws.is_connected()}
-    
+        """Return connection state plus operational policy and stream status."""
+        app_context = ctx.request_context.lifespan_context
+        return {
+            "is_connected": app_context.tws.is_connected(),
+            "operational": app_context.runtime.status(),
+        }
+
     @mcp.tool()
     async def ibkr_get_current_time(
-        ctx: Context[ServerSession, AppContext]
+        ctx: Context[ServerSession, AppContext],
     ) -> Dict[str, Any]:
-        """Get current server time from TWS/Gateway.
-        
-        Returns:
-            Server time as ISO string
-        """
+        """Get the current IBKR server time."""
         tws = ctx.request_context.lifespan_context.tws
         if not tws or not tws.is_connected():
             return {"error": "TWS client not connected"}
-        
         current_time = await tws.ib.reqCurrentTimeAsync()
         return {
             "server_time": current_time.isoformat(),
-            "timestamp": current_time.timestamp()
+            "timestamp": current_time.timestamp(),
         }
-    
+
     @mcp.tool()
     async def ibkr_get_managed_accounts(
-        ctx: Context[ServerSession, AppContext]
+        ctx: Context[ServerSession, AppContext],
     ) -> Dict[str, Any]:
-        """Get list of managed accounts.
-        
-        Returns:
-            List of account IDs accessible to this connection
-        """
-        tws = ctx.request_context.lifespan_context.tws
+        """Get managed account IDs and the paper/live account heuristic."""
+        app_context = ctx.request_context.lifespan_context
+        tws = app_context.tws
         if not tws or not tws.is_connected():
             return {"error": "TWS client not connected"}
-        
-        accounts = tws.ib.managedAccounts()
+        accounts = list(tws.ib.managedAccounts())
+        mode, reason = app_context.runtime.detect_account_mode(accounts)
         return {
             "accounts": accounts,
-            "count": len(accounts)
+            "count": len(accounts),
+            "account_mode": mode,
+            "account_mode_reason": reason,
         }

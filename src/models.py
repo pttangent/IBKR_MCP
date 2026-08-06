@@ -4,12 +4,15 @@ from dataclasses import dataclass
 
 if TYPE_CHECKING:
     from .tws_client import TWSClient
+    from .operational import RuntimeState
 
 
 @dataclass
 class AppContext:
     """Application context for MCP server."""
     tws: 'TWSClient'
+    runtime: 'RuntimeState'
+
 
 class ContractRequest(BaseModel):
     symbol: str
@@ -17,12 +20,14 @@ class ContractRequest(BaseModel):
     exchange: str = "SMART"
     currency: str = "USD"
 
+
 class HistoricalDataRequest(BaseModel):
     contract: ContractRequest
     durationStr: str = "1 Y"
     barSizeSetting: str = "1 day"
     whatToShow: str = "TRADES"
     useRTH: int = 1
+
 
 class OrderRequest(BaseModel):
     contract: ContractRequest
@@ -33,11 +38,13 @@ class OrderRequest(BaseModel):
     auxPrice: Optional[float] = None
     transmit: bool = True
 
+
 class PositionModel(BaseModel):
     account: str
     contract: Dict[str, Any]
     position: float
     avgCost: float
+
 
 class AccountSummaryModel(BaseModel):
     tag: str
@@ -45,12 +52,14 @@ class AccountSummaryModel(BaseModel):
     currency: str
     account: str
 
+
 class OrderStatusModel(BaseModel):
     orderId: int
     status: str
     filled: float
     remaining: float
     avgFillPrice: float
+
 
 class ExecutionModel(BaseModel):
     execId: str
@@ -71,4 +80,3 @@ class ExecutionModel(BaseModel):
     evMultiplier: Optional[float]
     modelCode: Optional[str]
     lastLiquidity: Optional[int]
-

@@ -1,7 +1,7 @@
 [project]
 name = "ibkr-tws-mcp-server"
-version = "0.1.0"
-description = "Add your description here"
+version = "0.2.0"
+description = "Operationally safe MCP server for IBKR TWS with capability probes, labelled market data, pacing guards, and paper-trading skills"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
