@@ -11,6 +11,7 @@ from starlette.routing import Route
 from .models import AppContext
 from .operational import RuntimePolicy, RuntimeState
 from .prompts import register_all_prompts
+from .radar_dashboard import tick_radar_dashboard, tick_radar_snapshot
 from .resources import (
     register_market_data_resource,
     register_news_resource,
@@ -30,6 +31,7 @@ from .tools import (
     register_order_tools,
     register_read_only_order_tools,
     register_scanner_tools,
+    register_tick_radar_tools,
 )
 from .tws_client import TWSClient
 
@@ -45,6 +47,14 @@ async def app_lifespan(server: FastMCP) -> AsyncIterator[AppContext]:
     try:
         yield AppContext(tws=tws, runtime=runtime)
     finally:
+        radar_manager = getattr(runtime, "tick_radar_manager", None)
+        if radar_manager is not None:
+            try:
+                await radar_manager.shutdown()
+            except Exception as exc:
+                runtime.recent_errors.append(
+                    {"stage": "tick_radar_shutdown", "error": str(exc)}
+                )
         for stream in list(runtime.operational_streams.values()):
             task = stream.get("task")
             if task:
@@ -70,6 +80,7 @@ register_scanner_tools(mcp)
 register_advanced_tools(mcp)
 register_fundamentals_tools(mcp)
 register_operational_tools(mcp)
+register_tick_radar_tools(mcp)
 
 legacy_write_tools_enabled = (
     SERVER_POLICY.order_tools_enabled and SERVER_POLICY.enable_legacy_order_tools
@@ -106,12 +117,19 @@ async def health_check(request):
             "order_tools_enabled": SERVER_POLICY.order_tools_enabled,
             "legacy_order_tools_enabled": legacy_write_tools_enabled,
             "read_only_order_monitoring": not legacy_write_tools_enabled,
+            "tick_radar_dashboard": "/radar",
         }
     )
 
 
 mcp_base_app = mcp.streamable_http_app()
-mcp_base_app.routes.extend([Route("/health", health_check)])
+mcp_base_app.routes.extend(
+    [
+        Route("/health", health_check, methods=["GET"]),
+        Route("/radar", tick_radar_dashboard, methods=["GET"]),
+        Route("/api/v1/radar/snapshot", tick_radar_snapshot, methods=["GET"]),
+    ]
+)
 
 
 @asynccontextmanager
