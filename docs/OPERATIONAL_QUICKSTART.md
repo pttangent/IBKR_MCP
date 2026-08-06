@@ -51,10 +51,11 @@ Do not assume a paper account has live data. Do not infer data type from the pre
 
 1. Run scanner tools sequentially.
 2. Deduplicate symbols.
-3. Call `ibkr_plan_watchlist`.
-4. Start `ibkr_start_operational_market_data` for accepted symbols.
-5. Read `ibkr://operational-market-data/{symbol}` and accept only `trade_eligible=true` for intraday action.
-6. Stop discarded streams to release quote lines.
+3. Pull daily or intraday bars with `ibkr_get_operational_historical_data`; this path applies cache and historical pacing checks.
+4. Call `ibkr_plan_watchlist`.
+5. Start `ibkr_start_operational_market_data` for accepted symbols.
+6. Read `ibkr://operational-market-data/{symbol}` and accept only `trade_eligible=true` for intraday action.
+7. Stop discarded streams to release quote lines.
 
 ## 6. Guarded paper order
 
@@ -65,6 +66,6 @@ Before placing a paper order:
 3. Start the exact symbol's operational market-data stream.
 4. Confirm its resource reports fresh `LIVE` data.
 5. Call `ibkr_validate_order_intent`.
-6. Call `ibkr_place_guarded_stock_order` with a limit price and confirmation token.
+6. Call `ibkr_place_guarded_stock_order` with a USD stock limit price and a single-use confirmation token.
 
-The guarded tool rejects delayed/frozen/stale data, unknown accounts, excessive notional and missing confirmation.
+The guarded tool rejects delayed/frozen/stale data, unknown accounts, excessive notional, reused confirmation tokens, duplicate same-side orders, short sales and missing confirmation.
