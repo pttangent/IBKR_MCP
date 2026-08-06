@@ -11,6 +11,7 @@ from .scanner import register_scanner_tools
 from .advanced import register_advanced_tools
 from .fundamentals import register_fundamentals_tools
 from .operations import register_operational_tools
+from .read_only_orders import register_read_only_order_tools
 
 __all__ = [
     'register_connection_tools',
@@ -24,4 +25,5 @@ __all__ = [
     'register_advanced_tools',
     'register_fundamentals_tools',
     'register_operational_tools',
+    'register_read_only_order_tools',
 ]
