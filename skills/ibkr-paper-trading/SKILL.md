@@ -1,6 +1,6 @@
 ---
 name: ibkr-paper-trading
-description: Place and monitor tightly guarded IBKR paper stock limit orders after account, data, risk, and explicit-confirmation checks.
+description: Place and monitor tightly guarded IBKR paper stock limit orders after account, data, risk, idempotency, and explicit-confirmation checks.
 ---
 
 # IBKR Guarded Paper Trading
@@ -18,7 +18,7 @@ Do not use this skill under delayed/frozen/unknown data. Do not substitute a suc
 ## Order workflow
 
 1. Read account values, positions, open orders and daily P&L.
-2. Verify no duplicate open order already expresses the same intent.
+2. Verify no duplicate open order already expresses the same symbol and side.
 3. Determine a limit price from the current fresh bid/ask; do not submit a market order.
 4. Call `ibkr_validate_order_intent` with account, symbol, side, quantity, estimated price and confirmation token.
 5. Stop if any blocker is returned.
@@ -29,6 +29,9 @@ Do not use this skill under delayed/frozen/unknown data. Do not substitute a suc
 ## Risk rules
 
 - Respect `IBKR_MAX_ORDER_NOTIONAL_USD` and `IBKR_MAX_ORDERS_PER_DAY`.
+- A confirmation token is single-use; never retry a submission with the same token after an ambiguous response until order state is reconciled.
+- Guarded orders currently support USD stocks only.
+- Short sales are blocked; a SELL quantity cannot exceed the visible long position.
 - Do not increase quantity after confirmation without a new confirmation token.
 - Do not place a new ordinary entry after 15:30 ET unless the user's strategy explicitly allows it.
 - Suspend all new orders on connectivity loss, `10197`, stale data or account-mode ambiguity.
