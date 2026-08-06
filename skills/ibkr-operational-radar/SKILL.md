@@ -1,6 +1,6 @@
 ---
 name: ibkr-operational-radar
-description: Run a scanner-driven intraday market radar using only IBKR MCP scanners, historical bars, labelled market-data resources, news, and deterministic signal calculations.
+description: Run a scanner-driven intraday market radar using only IBKR MCP scanners, paced historical bars, labelled market-data resources, news, and deterministic signal calculations.
 ---
 
 # IBKR Operational Radar
@@ -17,7 +17,7 @@ Run the `ibkr-preflight` skill. Continue with intraday radar only under `LIVE_FU
    - `TOP_PERC_GAIN`
    - `TOP_PERC_LOSE`
 2. Keep at most 50 rows per scan and deduplicate by conId/symbol.
-3. Pull historical bars through cached/batched requests. Respect the historical governor and never repeat an identical request within 15 seconds.
+3. Pull bars through `ibkr_get_operational_historical_data`, which applies the historical request governor and an in-memory cache. Do not use the legacy ungoverned historical tool for scheduled radar loops.
 4. Calculate deterministic filters: liquidity, ATR, gap, average volume, recent trend and relative strength versus SPY/QQQ.
 5. Call `ibkr_plan_watchlist` with the reduced candidate list.
 
