@@ -112,6 +112,7 @@ def register_options_tools(mcp: FastMCP):
         ctx: Context[ServerSession, AppContext],
         symbol: str,
         expiration: str,
+        num_strikes: int = 10,
         exchange: str = "SMART",
         currency: str = "USD"
     ) -> Dict[str, Any]:
@@ -120,11 +121,12 @@ def register_options_tools(mcp: FastMCP):
         Args:
             symbol: Underlying symbol
             expiration: Option expiration (YYYYMMDD format)
+            num_strikes: Strikes around ATM (20=quick query, 50=deep research)
             exchange: Exchange (default: SMART)
             currency: Currency (default: USD)
             
         Returns:
-            Full option chain with calls and puts
+            Option chain with calls, puts, and Greeks
         """
         tws = ctx.request_context.lifespan_context.tws
         if not tws or not tws.is_connected():
@@ -145,72 +147,91 @@ def register_options_tools(mcp: FastMCP):
         if not chains:
             return {"error": f"No option chains found for {symbol}"}
         
-        # Find matching expiration
-        strikes = None
+        # Find best chain for this expiration (pick the one with most strikes)
+        best_strikes = []
+        best_trading_class = ""
         for chain in chains:
             if expiration in chain.expirations:
-                strikes = sorted(chain.strikes)
-                break
+                s = sorted(chain.strikes)
+                if len(s) > len(best_strikes):
+                    best_strikes = s
+                    best_trading_class = getattr(chain, 'tradingClass', '')
         
-        if not strikes:
-            return {"error": f"Expiration {expiration} not found"}
+        if not best_strikes:
+            return {"error": f"Expiration {expiration} not found. Available: {[e for c in chains for e in c.expirations[:5]]}"}
         
-        # Request market data for all options
+        strikes = best_strikes
+        
+        # Get underlying close price from historical bars (works 24/7)
+        ref_price = strikes[len(strikes) // 2]  # fallback
+        try:
+            stock_bars = await tws.ib.reqHistoricalDataAsync(
+                stock, endDateTime="", durationStr="1 D",
+                barSizeSetting="1 day", whatToShow="TRADES",
+                useRTH=True, formatDate=1)
+            if stock_bars and stock_bars[-1].close > 0:
+                ref_price = stock_bars[-1].close
+        except Exception:
+            pass
+        
+        mid = min(range(len(strikes)), key=lambda i: abs(strikes[i]-ref_price))
+        half = num_strikes // 2
+        strikes = strikes[max(0, mid-half):mid+half]
+        
+        # Filter to only strikes that actually exist in this chain
+        strikes = [s for s in strikes if s in best_strikes]
+        
+        # Build contracts with the correct trading class
         calls = []
         puts = []
-        
+        tc = best_trading_class
         for strike in strikes:
-            # Call option
-            call = Option(symbol, expiration, strike, 'C', exchange, currency=currency)
-            # Put option
-            put = Option(symbol, expiration, strike, 'P', exchange, currency=currency)
-            
-            calls.append(call)
-            puts.append(put)
+            calls.append(Option(symbol, expiration, strike, 'C', exchange, currency=currency, tradingClass=tc))
+            puts.append(Option(symbol, expiration, strike, 'P', exchange, currency=currency, tradingClass=tc))
         
-        # Qualify all contracts
-        all_options = calls + puts
-        await tws.ib.qualifyContractsAsync(*all_options)
-        
-        # Request market data
-        call_tickers = [tws.ib.reqMktData(opt) for opt in calls]
-        put_tickers = [tws.ib.reqMktData(opt) for opt in puts]
-        
-        await tws.ib.sleep(2)  # Wait for market data
-        
-        # Build results
+        # Qualify each call/put pair individually
         chain_data = []
         for i, strike in enumerate(strikes):
-            call_ticker = call_tickers[i]
-            put_ticker = put_tickers[i]
+            call = calls[i]
+            put = puts[i]
+            try:
+                q = await tws.ib.qualifyContractsAsync(call, put)
+            except Exception:
+                continue
+            # Filter out None (ambiguous/unresolved contracts)
+            q_call = q[0] if len(q) > 0 and q[0] else None
+            q_put = q[1] if len(q) > 1 and q[1] else None
             
-            chain_data.append({
-                "strike": strike,
-                "call": {
-                    "bid": call_ticker.bid,
-                    "ask": call_ticker.ask,
-                    "last": call_ticker.last,
-                    "volume": call_ticker.volume,
-                    "openInterest": call_ticker.openInterest
-                },
-                "put": {
-                    "bid": put_ticker.bid,
-                    "ask": put_ticker.ask,
-                    "last": put_ticker.last,
-                    "volume": put_ticker.volume,
-                    "openInterest": put_ticker.openInterest
-                }
-            })
-        
-        # Cancel market data
-        for ticker in call_tickers + put_tickers:
-            tws.ib.cancelMktData(ticker.contract)
+            for j, opt_q in enumerate([q_call, q_put]):
+                if opt_q is None:
+                    continue
+                try:
+                    bars = await tws.ib.reqHistoricalDataAsync(
+                        opt_q, endDateTime="", durationStr="1 D",
+                        barSizeSetting="5 mins", whatToShow="TRADES",
+                        useRTH=True, formatDate=1)
+                    if bars and len(bars) > 0:
+                        last = bars[-1]
+                        entry = {
+                            "strike": strike,
+                            "right": "C" if j == 0 else "P",
+                            "last": last.close,
+                            "high": max(b.high for b in bars[-12:]),
+                            "low": min(b.low for b in bars[-12:]),
+                            "volume": sum(b.volume for b in bars),
+                            "bars": len(bars),
+                        }
+                        chain_data.append(entry)
+                except Exception:
+                    continue
         
         return {
             "symbol": symbol,
             "expiration": expiration,
             "chain": chain_data,
-            "strikeCount": len(strikes)
+            "strikeCount": len(strikes),
+            "_v": "2.0",
+            "_ref_price": ref_price
         }
     
     @mcp.tool()

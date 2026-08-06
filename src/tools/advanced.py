@@ -49,6 +49,7 @@ def register_advanced_tools(mcp: FastMCP):
         symbol: str,
         tickType: str = "Last",
         numberOfTicks: int = 100,
+        startDateTime: str = "",
         exchange: str = "SMART",
         currency: str = "USD"
     ) -> Dict[str, Any]:
@@ -56,8 +57,9 @@ def register_advanced_tools(mcp: FastMCP):
         
         Args:
             symbol: Contract symbol
-            tickType: Last, BidAsk, MidPoint, or AllLast
+            tickType: Last, BidAsk, MidPoint, or AllLast (default: Last)
             numberOfTicks: Number of ticks to retrieve (max: 1000)
+            startDateTime: Start time in IB format 'YYYYMMDD HH:mm:ss US/Eastern' (default: today 9:30 ET)
             exchange: Exchange (default: SMART)
             currency: Currency (default: USD)
             
@@ -68,15 +70,22 @@ def register_advanced_tools(mcp: FastMCP):
         if not tws or not tws.is_connected():
             return {"error": "TWS client not connected"}
         
+        from datetime import datetime
+        if not startDateTime:
+            today = datetime.now().strftime("%Y%m%d")
+            startDateTime = f"{today} 09:30:00 US/Eastern"
+        
         contract = Stock(symbol, exchange, currency)
+        qualified = await tws.ib.qualifyContractsAsync(contract)
         
         ticks = await tws.ib.reqHistoricalTicksAsync(
-            contract,
-            startDateTime='',
+            qualified[0],
+            startDateTime=startDateTime,
             endDateTime='',
             numberOfTicks=numberOfTicks,
-            whatToShow=tickType,
-            useRth=False
+            whatToShow='TRADES' if tickType == 'Last' else tickType,
+            useRth=True,
+            ignoreSize=False
         )
         
         results = []

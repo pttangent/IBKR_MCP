@@ -18,7 +18,8 @@ from .tools import (
     register_news_tools,
     register_options_tools,
     register_scanner_tools,
-    register_advanced_tools
+    register_advanced_tools,
+    register_fundamentals_tools
 )
 from .resources import (
     register_market_data_resource,
@@ -58,6 +59,7 @@ register_news_tools(mcp)
 register_options_tools(mcp)
 register_scanner_tools(mcp)
 register_advanced_tools(mcp)
+register_fundamentals_tools(mcp)
 
 # Register all resources
 register_market_data_resource(mcp)

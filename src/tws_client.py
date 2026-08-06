@@ -914,3 +914,22 @@ class TWSClient:
             "allMessages": allMessages,
             "message": "News bulletins subscription started. Bulletins will be delivered via IB events."
         }
+
+    async def qualify_contract(self, symbol: str, sec_type: str = "STK", exchange: str = "SMART", currency: str = "USD"):
+        """Helper to qualify a contract from symbol."""
+        if not self.is_connected():
+            raise RuntimeError("Not connected to TWS")
+        from ib_async import Stock
+        contract = Stock(symbol, exchange, currency)
+        qualified = await self.ib.qualifyContractsAsync(contract)
+        return qualified[0]
+
+    async def get_fundamental_data(self, contract, report_type: str):
+        """Get Reuters fundamental data for a contract."""
+        if not self.is_connected():
+            raise RuntimeError("Not connected to TWS")
+        try:
+            data = await self.ib.reqFundamentalDataAsync(contract, report_type)
+            return {"xml": str(data)[:50000]} if data else {"empty": True}
+        except Exception as e:
+            raise RuntimeError(f"Fundamental data not available: {e}")
